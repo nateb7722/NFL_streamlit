@@ -1,0 +1,20 @@
+# conda env create -f streamlit_environment_mac.yml
+# For Mac (including Apple Silicon)
+
+name: nfl_streamlit
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - streamlit>=1.31.0          # Core framework
+  - pandas>=2.2.0              # Data manipulation
+  - numpy>=1.26.0              # Numerical operations
+  - boto3>=1.34.0              # AWS S3 integration
+  - plotly>=5.18.0             # Interactive visualizations
+  - altair>=5.2.0              # Alternative viz library (Streamlit native)
+  - scipy>=1.12.0              # Statistical calculations
+  - scikit-learn>=1.4.0        # ML utilities
+  - pip
+  - pip:
+    - streamlit-aggrid>=0.3.4  # Enhanced data tables
