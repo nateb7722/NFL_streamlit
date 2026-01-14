@@ -1,2 +1,21 @@
 *.csv
 secrets_env.py
+secrets.py
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE files
+.idea/
+.vscode/
+
+# Temporary exploration scripts
+tmpclaude-*
+check_*.py
+fetch_docs.py
+list_s3_files.py
+review_dataset_columns.py
+
+# Claude settings
+.claude/settings.local.json

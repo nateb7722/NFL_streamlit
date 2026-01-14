@@ -1,0 +1,1 @@
+Do not add that claude or anthropic are the authors of any code in this project. Keep commit messages simple with a list of files changed and very short descriptions of what was changed
