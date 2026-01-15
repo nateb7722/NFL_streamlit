@@ -1,6 +1,6 @@
 """
-Data loading utilities for NFL Betting Analytics Dashboard
-Handles S3 connections and data caching
+Data loading utilities for NFL Betting Analytics Dashboard V1
+Handles S3 connections and data caching with V1-approved datasets
 """
 
 import boto3
@@ -11,9 +11,9 @@ import sys
 from io import BytesIO
 import time
 
-# Add parent directory to path to import secrets_env
+# Add parent directory to path to import secrets_config
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from secrets_env import *
+import secrets_config  # This sets AWS environment variables
 
 
 @st.cache_resource
@@ -59,23 +59,55 @@ def load_csv_from_s3(file_key, max_retries=3):
                 return None
 
 
-@st.cache_data(ttl=3600)
-def load_training_data_full_game():
+def load_excel_from_s3(file_key, max_retries=3):
     """
-    Load main training dataset with ATS, spreads, scores
+    Load an Excel file from S3 with retry logic
+
+    Args:
+        file_key (str): S3 object key/path
+        max_retries (int): Maximum number of retry attempts
 
     Returns:
-        pd.DataFrame: Training data with betting information
+        pd.DataFrame: Loaded dataframe
     """
-    df = load_csv_from_s3('Prod/core/training_data_full_game.csv')
+    s3 = get_s3_client()
+    bucket = os.environ.get('AWS_S3_BUCKET')
+
+    for attempt in range(max_retries):
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=file_key)
+            df = pd.read_excel(BytesIO(obj['Body'].read()), engine='openpyxl')
+            return df
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            else:
+                st.error(f"Failed to load {file_key} after {max_retries} attempts: {str(e)}")
+                return None
+
+
+# =============================================================================
+# V1 DATA LOADERS - Primary datasets for V1 dashboard
+# =============================================================================
+
+@st.cache_data(ttl=3600)
+def load_int_game_df_team_week():
+    """
+    Load team-week performance data (non-shifted)
+    Contains EPA metrics, betting results, and team performance by week
+
+    Returns:
+        pd.DataFrame: Team-week performance data with 212 columns
+    """
+    df = load_csv_from_s3('Prod/int/int_game_df_team_week_2017_2025.csv')
 
     if df is not None:
-        # Data type conversions
+        # Type conversions
         if 'game_date' in df.columns:
             df['game_date'] = pd.to_datetime(df['game_date'], errors='coerce')
 
-        # Ensure numeric columns
-        numeric_cols = ['season', 'week', 'score', 'against_score', 'total_line']
+        numeric_cols = ['season', 'week', 'score', 'against_score', 'spread', 'total_line']
         for col in numeric_cols:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
@@ -84,57 +116,17 @@ def load_training_data_full_game():
 
 
 @st.cache_data(ttl=3600)
-def load_team_week_averages():
+def load_game_df_team_week_shifted():
     """
-    Load 3-week rolling averages with EPA metrics
+    Load team-week pre-game data (shifted for predictions)
+    Contains lag-1 shifted stats for making predictions before games
 
     Returns:
-        pd.DataFrame: Team performance metrics with rolling averages
+        pd.DataFrame: Shifted team-week data
     """
-    df = load_csv_from_s3('Prod/core/game_df_team_week_averages_3_week_sequence.csv')
+    df = load_csv_from_s3('Prod/core/game_df_team_week_shifted_2017_2025.csv')
 
     if df is not None:
-        # Ensure numeric columns
-        numeric_cols = ['season', 'week']
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    return df
-
-
-@st.cache_data(ttl=3600)
-def load_strength_of_schedule():
-    """
-    Load strength of schedule data
-
-    Returns:
-        pd.DataFrame: Weekly strength of schedule metrics
-    """
-    df = load_csv_from_s3('Prod/core/weekly_strength_of_schedule.csv')
-
-    if df is not None:
-        # Ensure numeric columns
-        numeric_cols = ['season', 'week']
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    return df
-
-
-@st.cache_data(ttl=3600)
-def load_play_by_play():
-    """
-    Load play-by-play data with injury adjustments
-
-    Returns:
-        pd.DataFrame: Play-by-play level data
-    """
-    df = load_csv_from_s3('Prod/core/play_by_play.csv')
-
-    if df is not None:
-        # Data type conversions
         if 'game_date' in df.columns:
             df['game_date'] = pd.to_datetime(df['game_date'], errors='coerce')
 
@@ -147,14 +139,39 @@ def load_play_by_play():
 
 
 @st.cache_data(ttl=3600)
-def load_team_week_shifted():
+def load_int_game_df():
     """
-    Load shifted team/week data for predictive modeling
+    Load game-level data with home/away team stats
 
     Returns:
-        pd.DataFrame: Shifted team performance data
+        pd.DataFrame: Game-level data with 203 columns
     """
-    df = load_csv_from_s3('Prod/core/game_df_team_week_shifted.csv')
+    df = load_csv_from_s3('Prod/int/int_game_df_2017_2025.csv')
+
+    if df is not None:
+        if 'game_date' in df.columns:
+            df['game_date'] = pd.to_datetime(df['game_date'], errors='coerce')
+
+        numeric_cols = ['season', 'week']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    return df
+
+
+@st.cache_data(ttl=3600)
+def load_weekly_starters(side='offense'):
+    """
+    Load weekly starter depth charts with grades pre-merged
+
+    Args:
+        side (str): 'offense' or 'defense'
+
+    Returns:
+        pd.DataFrame: Weekly starter data with player grades
+    """
+    df = load_csv_from_s3(f'Prod/core/weekly_starters_depth_chart_{side}_2016_2025.csv')
 
     if df is not None:
         numeric_cols = ['season', 'week']
@@ -166,67 +183,17 @@ def load_team_week_shifted():
 
 
 @st.cache_data(ttl=3600)
-def load_player_ratings_grades(position_group):
+def load_healthy_starters(side='offense'):
     """
-    Load player ratings grades for a specific position group
+    Load healthy starter depth charts with grades pre-merged
 
     Args:
-        position_group (str): One of 'blocking', 'defense', 'passing', 'receiving',
-                             'rushing', 'special_teams'
+        side (str): 'offense' or 'defense'
 
     Returns:
-        pd.DataFrame: Player grades
+        pd.DataFrame: Healthy starter data with player grades
     """
-    file_key = f'Prod/core/player_ratings_{position_group}_grades.csv'
-    df = load_csv_from_s3(file_key)
-
-    if df is not None:
-        numeric_cols = ['season']
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    return df
-
-
-@st.cache_data(ttl=3600)
-def load_player_ratings_stats(position_group):
-    """
-    Load player ratings stats for a specific position group
-
-    Args:
-        position_group (str): One of 'blocking', 'defense', 'passing', 'receiving',
-                             'rushing', 'special_teams'
-
-    Returns:
-        pd.DataFrame: Player stats
-    """
-    file_key = f'Prod/core/player_ratings_{position_group}_stats.csv'
-    df = load_csv_from_s3(file_key)
-
-    if df is not None:
-        numeric_cols = ['season']
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    return df
-
-
-@st.cache_data(ttl=3600)
-def load_depth_charts(chart_type):
-    """
-    Load depth chart data
-
-    Args:
-        chart_type (str): One of 'weekly_starters_offense', 'weekly_starters_defense',
-                         'healthy_starters_offense', 'healthy_starters_defense'
-
-    Returns:
-        pd.DataFrame: Depth chart data
-    """
-    file_key = f'Prod/core/{chart_type}_depth_chart.csv'
-    df = load_csv_from_s3(file_key)
+    df = load_csv_from_s3(f'Prod/core/healthy_starters_depth_chart_{side}_2016_2025.csv')
 
     if df is not None:
         numeric_cols = ['season', 'week']
@@ -238,34 +205,45 @@ def load_depth_charts(chart_type):
 
 
 @st.cache_data(ttl=3600)
-def load_coaching_game_level():
+def load_team_logos():
     """
-    Load coaching data by game
+    Load team logo mappings from Excel
 
     Returns:
-        pd.DataFrame: Coaching matchup data
+        dict: Mapping of team names to logo URLs {team: url}
     """
-    df = load_csv_from_s3('Prod/core/coaching_game_level.csv')
+    df = load_excel_from_s3('Prod/aux/team_logos_and_wordmarks/Team Logos.xlsx')
 
     if df is not None:
-        numeric_cols = ['season', 'week']
-        for col in numeric_cols:
+        # Try common column naming conventions
+        team_col = None
+        url_col = None
+
+        # Find team column
+        for col in ['team', 'team_name', 'Team', 'Team Name', 'team_abbr', 'Team Abbr']:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+                team_col = col
+                break
 
-    return df
+        # Find URL column
+        for col in ['logo_url', 'url', 'Logo URL', 'URL', 'logo', 'Logo', 'team_logo_espn']:
+            if col in df.columns:
+                url_col = col
+                break
+
+        if team_col and url_col:
+            return df.set_index(team_col)[url_col].to_dict()
+
+        # If specific columns not found, try first two columns
+        if len(df.columns) >= 2:
+            return df.set_index(df.columns[0])[df.columns[1]].to_dict()
+
+    return {}
 
 
-@st.cache_data(ttl=3600)
-def load_player_id_dictionary():
-    """
-    Load player ID mappings
-
-    Returns:
-        pd.DataFrame: Player ID cross-reference
-    """
-    return load_csv_from_s3('Prod/core/player_id_dictionary.csv')
-
+# =============================================================================
+# HELPER FUNCTIONS - Reused from V0
+# =============================================================================
 
 def get_available_teams(df):
     """
@@ -297,13 +275,13 @@ def get_available_seasons(df):
         df (pd.DataFrame): DataFrame containing 'season' column
 
     Returns:
-        list: Sorted list of unique seasons
+        list: Sorted list of unique seasons (descending - most recent first)
     """
     if df is None or 'season' not in df.columns:
         return []
 
     seasons = df['season'].dropna().unique().tolist()
-    return sorted([int(s) for s in seasons if pd.notna(s)])
+    return sorted([int(s) for s in seasons if pd.notna(s)], reverse=True)
 
 
 def get_available_weeks(df, season=None):
@@ -323,3 +301,50 @@ def get_available_weeks(df, season=None):
     filtered_df = df if season is None else df[df['season'] == season]
     weeks = filtered_df['week'].dropna().unique().tolist()
     return sorted([int(w) for w in weeks if pd.notna(w)])
+
+
+def get_current_season_week(df):
+    """
+    Determine the current NFL season and week based on the latest available data
+
+    Args:
+        df (pd.DataFrame): DataFrame with season and week columns
+
+    Returns:
+        tuple: (current_season, current_week)
+    """
+    if df is None or df.empty:
+        from datetime import datetime
+        return (datetime.now().year, 1)
+
+    max_season = int(df['season'].max())
+    max_week = int(df[df['season'] == max_season]['week'].max())
+
+    return (max_season, max_week)
+
+
+# =============================================================================
+# LEGACY LOADERS - Kept for backwards compatibility if needed
+# =============================================================================
+
+@st.cache_data(ttl=3600)
+def load_training_data_full_game():
+    """
+    [LEGACY] Load main training dataset with ATS, spreads, scores
+    Note: This is V0 dataset - prefer load_int_game_df_team_week() for V1
+
+    Returns:
+        pd.DataFrame: Training data with betting information
+    """
+    df = load_csv_from_s3('Prod/core/training_data_full_game.csv')
+
+    if df is not None:
+        if 'game_date' in df.columns:
+            df['game_date'] = pd.to_datetime(df['game_date'], errors='coerce')
+
+        numeric_cols = ['season', 'week', 'score', 'against_score', 'total_line']
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    return df

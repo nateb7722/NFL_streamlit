@@ -1,12 +1,16 @@
 """
-Data processing and transformation utilities
-Business logic for ATS calculations, EPA differentials, and betting analytics
+Data processing and transformation utilities for NFL Dashboard V1
+Business logic for team aggregates, EPA calculations, player grades, and injury impact
 """
 
 import pandas as pd
 import numpy as np
 from datetime import datetime
 
+
+# =============================================================================
+# CORE FILTERING FUNCTIONS - Reused from V0
+# =============================================================================
 
 def get_current_week(training_data):
     """
@@ -19,14 +23,11 @@ def get_current_week(training_data):
         tuple: (current_season, current_week)
     """
     if training_data is None or training_data.empty:
-        # Default to week 1 of current year if no data
         return (datetime.now().year, 1)
 
-    # Get the most recent season and week
     max_season = training_data['season'].max()
     max_week = training_data[training_data['season'] == max_season]['week'].max()
 
-    # Return next week (current week to predict)
     if pd.notna(max_week) and max_week < 18:
         return (int(max_season), int(max_week) + 1)
     else:
@@ -51,31 +52,201 @@ def filter_by_season_week(df, seasons=None, weeks=None, teams=None):
 
     filtered_df = df.copy()
 
-    # Filter by seasons
     if seasons is not None and len(seasons) > 0:
         filtered_df = filtered_df[filtered_df['season'].isin(seasons)]
 
-    # Filter by weeks
     if weeks is not None:
         if isinstance(weeks, tuple) and len(weeks) == 2:
-            # Week range (min, max)
             filtered_df = filtered_df[
                 (filtered_df['week'] >= weeks[0]) &
                 (filtered_df['week'] <= weeks[1])
             ]
         elif isinstance(weeks, list):
-            # Specific weeks
             filtered_df = filtered_df[filtered_df['week'].isin(weeks)]
 
-    # Filter by teams
     if teams is not None and len(teams) > 0:
-        # Check if 'team' or 'team_name' column exists
         team_col = 'team' if 'team' in filtered_df.columns else 'team_name' if 'team_name' in filtered_df.columns else None
         if team_col:
             filtered_df = filtered_df[filtered_df[team_col].isin(teams)]
 
     return filtered_df
 
+
+# =============================================================================
+# V1 TEAM AGGREGATE FUNCTIONS
+# =============================================================================
+
+def calculate_team_season_aggregates(df, team, season):
+    """
+    Calculate season-level aggregates for a team
+
+    Args:
+        df (pd.DataFrame): Team-week data
+        team (str): Team name
+        season (int): Season year
+
+    Returns:
+        dict: Aggregated metrics
+    """
+    team_data = df[(df['team'] == team) & (df['season'] == season)]
+
+    if team_data.empty:
+        return {}
+
+    aggregates = {}
+
+    # EPA metrics
+    epa_cols = {
+        'epa_mean': 'avg_offensive_epa',
+        'against_epa_mean': 'avg_defensive_epa',
+        'pass_epa_mean': 'avg_pass_epa',
+        'run_epa_mean': 'avg_run_epa',
+        'against_pass_epa_mean': 'avg_pass_epa_allowed',
+        'against_run_epa_mean': 'avg_run_epa_allowed',
+    }
+
+    for col, key in epa_cols.items():
+        if col in team_data.columns:
+            aggregates[key] = team_data[col].mean()
+
+    # Scoring metrics
+    if 'score' in team_data.columns:
+        aggregates['avg_points_scored'] = team_data['score'].mean()
+    if 'against_score' in team_data.columns:
+        aggregates['avg_points_allowed'] = team_data['against_score'].mean()
+
+    # Opponent strength (if available)
+    opp_cols = {
+        'opp_against_epa_mean': 'avg_opp_offensive_epa',
+        'opp_epa_mean': 'avg_opp_defensive_epa',
+    }
+
+    for col, key in opp_cols.items():
+        if col in team_data.columns:
+            aggregates[key] = team_data[col].mean()
+
+    return aggregates
+
+
+def calculate_league_season_aggregates(df, season, through_week=None):
+    """
+    Calculate EPA aggregates for all teams in a season
+
+    Args:
+        df (pd.DataFrame): Team-week data
+        season (int): Season year
+        through_week (int, optional): Include data up to this week
+
+    Returns:
+        pd.DataFrame: League-wide aggregates by team
+    """
+    season_data = df[df['season'] == season]
+
+    if through_week is not None:
+        season_data = season_data[season_data['week'] <= through_week]
+
+    if season_data.empty:
+        return pd.DataFrame()
+
+    # Define aggregation columns based on what's available
+    agg_dict = {}
+
+    epa_cols = ['epa_mean', 'against_epa_mean', 'pass_epa_mean', 'run_epa_mean',
+                'against_pass_epa_mean', 'against_run_epa_mean']
+
+    for col in epa_cols:
+        if col in season_data.columns:
+            agg_dict[col] = 'mean'
+
+    if 'score' in season_data.columns:
+        agg_dict['score'] = 'mean'
+    if 'against_score' in season_data.columns:
+        agg_dict['against_score'] = 'mean'
+
+    # Opponent strength columns
+    for col in ['opp_against_epa_mean', 'opp_epa_mean']:
+        if col in season_data.columns:
+            agg_dict[col] = 'mean'
+
+    if not agg_dict:
+        return pd.DataFrame()
+
+    league_agg = season_data.groupby('team').agg(agg_dict).reset_index()
+
+    return league_agg
+
+
+def calculate_records_by_situation(df, team, season):
+    """
+    Calculate W-L records by situation for a team
+
+    Args:
+        df (pd.DataFrame): Team-week data with game results
+        team (str): Team name
+        season (int): Season year
+
+    Returns:
+        dict: Records by situation
+    """
+    team_data = df[(df['team'] == team) & (df['season'] == season)]
+
+    if team_data.empty:
+        return {}
+
+    records = {}
+
+    # Calculate wins/losses
+    if 'score' in team_data.columns and 'against_score' in team_data.columns:
+        team_data = team_data.copy()
+        team_data['win'] = team_data['score'] > team_data['against_score']
+        team_data['loss'] = team_data['score'] < team_data['against_score']
+
+        wins = team_data['win'].sum()
+        losses = team_data['loss'].sum()
+        records['overall_record'] = f"{wins}-{losses}"
+
+        # Home/Away splits
+        if 'home_game' in team_data.columns:
+            home_games = team_data[team_data['home_game'] == 1]
+            home_wins = home_games['win'].sum()
+            home_losses = home_games['loss'].sum()
+            records['home_record'] = f"{home_wins}-{home_losses}"
+
+            away_games = team_data[team_data['home_game'] == 0]
+            away_wins = away_games['win'].sum()
+            away_losses = away_games['loss'].sum()
+            records['road_record'] = f"{away_wins}-{away_losses}"
+
+        # Favorite/Underdog splits
+        if 'spread' in team_data.columns:
+            favorites = team_data[team_data['spread'] < 0]
+            fav_wins = favorites['win'].sum()
+            fav_losses = favorites['loss'].sum()
+            records['favorite_record'] = f"{fav_wins}-{fav_losses}"
+
+            underdogs = team_data[team_data['spread'] > 0]
+            dog_wins = underdogs['win'].sum()
+            dog_losses = underdogs['loss'].sum()
+            records['underdog_record'] = f"{dog_wins}-{dog_losses}"
+
+    # ATS record
+    if 'spread_cover' in team_data.columns:
+        ats_wins = (team_data['spread_cover'] == 1).sum()
+        ats_losses = (team_data['spread_cover'] == 0).sum()
+        records['ats_record'] = f"{ats_wins}-{ats_losses}"
+
+    # O/U record
+    if 'total_cover' in team_data.columns:
+        overs = (team_data['total_cover'] == 1).sum()
+        unders = (team_data['total_cover'] == 0).sum()
+        records['ou_record'] = f"{overs}-{unders}"
+
+    return records
+
+
+# =============================================================================
+# BETTING CALCULATIONS - Reused from V0
+# =============================================================================
 
 def calculate_ats_record(training_data, team=None, location=None):
     """
@@ -94,28 +265,39 @@ def calculate_ats_record(training_data, team=None, location=None):
 
     df = training_data.copy()
 
-    # Filter by team
     if team:
         df = df[df['team'] == team]
 
-    # Filter by location (assuming there's a way to identify home/away)
-    # This depends on the data structure - adjust as needed
-    # For now, skipping location filter unless column exists
+    # Use spread_cover flag if available
+    if 'spread_cover' in df.columns:
+        team_col = 'team' if 'team' in df.columns else 'team_name'
 
-    # Calculate ATS result if not already present
-    # ATS Win: team covers the spread
-    # Assuming spread is from team's perspective
+        ats_summary = df.groupby(team_col).agg(
+            games=('spread_cover', 'count'),
+            ats_wins=('spread_cover', 'sum'),
+        ).reset_index()
+
+        ats_summary['ats_losses'] = ats_summary['games'] - ats_summary['ats_wins']
+        ats_summary['ats_record'] = (
+            ats_summary['ats_wins'].astype(int).astype(str) + '-' +
+            ats_summary['ats_losses'].astype(int).astype(str)
+        )
+        ats_summary['ats_pct'] = (
+            ats_summary['ats_wins'] / ats_summary['games']
+        ).round(3)
+
+        return ats_summary.sort_values('ats_pct', ascending=False)
+
+    # Fallback to calculating from spread/score if spread_cover not available
     if 'spread' in df.columns and 'score' in df.columns and 'against_score' in df.columns:
         df['margin'] = df['score'] - df['against_score']
         df['ats_result'] = df.apply(
             lambda row: 'W' if row['margin'] + row.get('spread', 0) > 0
             else 'L' if row['margin'] + row.get('spread', 0) < 0
-            else 'P',  # Push
+            else 'P',
             axis=1
         )
 
-    # Group by team and calculate ATS record
-    if 'ats_result' in df.columns:
         team_col = 'team' if 'team' in df.columns else 'team_name'
 
         ats_summary = df.groupby(team_col).agg(
@@ -127,11 +309,8 @@ def calculate_ats_record(training_data, team=None, location=None):
 
         ats_summary['ats_record'] = (
             ats_summary['ats_wins'].astype(str) + '-' +
-            ats_summary['ats_losses'].astype(str) +
-            (ats_summary['ats_pushes'] > 0).apply(lambda x: '' if not x else '-') +
-            ats_summary['ats_pushes'].apply(lambda x: '' if x == 0 else str(int(x)))
+            ats_summary['ats_losses'].astype(str)
         )
-
         ats_summary['ats_pct'] = (
             ats_summary['ats_wins'] /
             (ats_summary['ats_wins'] + ats_summary['ats_losses'])
@@ -140,100 +319,6 @@ def calculate_ats_record(training_data, team=None, location=None):
         return ats_summary.sort_values('ats_pct', ascending=False)
 
     return pd.DataFrame()
-
-
-def calculate_betting_edges(training_data, team_averages, current_season, current_week):
-    """
-    Calculate betting edges based on EPA differentials and team performance
-
-    Args:
-        training_data (pd.DataFrame): Historical game data
-        team_averages (pd.DataFrame): Team performance metrics with EPA
-        current_season (int): Current season
-        current_week (int): Current week
-
-    Returns:
-        pd.DataFrame: Betting edges with recommendations
-    """
-    if training_data is None or team_averages is None:
-        return pd.DataFrame()
-
-    # Get current week's matchups (if available in future data)
-    # For now, calculate edges based on latest team performance
-
-    # Filter team averages to most recent week
-    latest_data = team_averages[
-        (team_averages['season'] == current_season) &
-        (team_averages['week'] == current_week - 1)  # Previous week's stats
-    ].copy()
-
-    if latest_data.empty:
-        return pd.DataFrame()
-
-    # Calculate offensive and defensive EPA rankings
-    if 'epa_per_play_offense' in latest_data.columns:
-        latest_data['off_epa_rank'] = latest_data['epa_per_play_offense'].rank(ascending=False)
-
-    if 'epa_per_play_defense' in latest_data.columns:
-        latest_data['def_epa_rank'] = latest_data['epa_per_play_defense'].rank(ascending=True)  # Lower defense EPA is better
-
-    # Calculate overall edge score
-    if 'off_epa_rank' in latest_data.columns and 'def_epa_rank' in latest_data.columns:
-        latest_data['edge_score'] = (
-            (latest_data['off_epa_rank'] + latest_data['def_epa_rank']) / 2
-        )
-        latest_data = latest_data.sort_values('edge_score')
-
-    return latest_data
-
-
-def calculate_situational_ats(training_data):
-    """
-    Calculate ATS records in different situations
-
-    Args:
-        training_data (pd.DataFrame): Game data with spread results
-
-    Returns:
-        dict: Dictionary of situational ATS dataframes
-    """
-    if training_data is None or training_data.empty:
-        return {}
-
-    df = training_data.copy()
-
-    # Calculate ATS result if needed
-    if 'ats_result' not in df.columns and all(col in df.columns for col in ['score', 'against_score', 'spread']):
-        df['margin'] = df['score'] - df['against_score']
-        df['ats_result'] = df.apply(
-            lambda row: 'W' if row['margin'] + row.get('spread', 0) > 0
-            else 'L' if row['margin'] + row.get('spread', 0) < 0
-            else 'P',
-            axis=1
-        )
-
-    results = {}
-
-    # Overall ATS
-    results['overall'] = calculate_ats_record(df)
-
-    # Home/Away splits (if identifiable)
-    # This would require a column identifying home/away - adjust as needed
-
-    # As favorite/underdog
-    if 'spread' in df.columns:
-        favorites = df[df['spread'] < 0]
-        underdogs = df[df['spread'] > 0]
-
-        results['as_favorite'] = calculate_ats_record(favorites)
-        results['as_underdog'] = calculate_ats_record(underdogs)
-
-    # Divisional games (if identifiable)
-    if 'div_game' in df.columns:
-        divisional = df[df['div_game'] == True]
-        results['divisional'] = calculate_ats_record(divisional)
-
-    return results
 
 
 def calculate_over_under_record(training_data, team=None):
@@ -255,7 +340,27 @@ def calculate_over_under_record(training_data, team=None):
     if team:
         df = df[df['team'] == team]
 
-    # Calculate O/U result
+    # Use total_cover flag if available
+    if 'total_cover' in df.columns:
+        team_col = 'team' if 'team' in df.columns else 'team_name'
+
+        ou_summary = df.groupby(team_col).agg(
+            games=('total_cover', 'count'),
+            overs=('total_cover', 'sum'),
+        ).reset_index()
+
+        ou_summary['unders'] = ou_summary['games'] - ou_summary['overs']
+        ou_summary['ou_record'] = (
+            ou_summary['overs'].astype(int).astype(str) + '-' +
+            ou_summary['unders'].astype(int).astype(str)
+        )
+        ou_summary['over_pct'] = (
+            ou_summary['overs'] / ou_summary['games']
+        ).round(3)
+
+        return ou_summary
+
+    # Fallback calculation
     if all(col in df.columns for col in ['score', 'against_score', 'total_line']):
         df['total_points'] = df['score'] + df['against_score']
         df['ou_result'] = df.apply(
@@ -278,7 +383,6 @@ def calculate_over_under_record(training_data, team=None):
             ou_summary['overs'].astype(str) + '-' +
             ou_summary['unders'].astype(str)
         )
-
         ou_summary['over_pct'] = (
             ou_summary['overs'] /
             (ou_summary['overs'] + ou_summary['unders'])
@@ -289,62 +393,192 @@ def calculate_over_under_record(training_data, team=None):
     return pd.DataFrame()
 
 
-def get_team_trends(team_averages, team, num_weeks=3):
+def calculate_situational_ats(training_data):
     """
-    Get recent performance trends for a team
+    Calculate ATS records in different situations
 
     Args:
-        team_averages (pd.DataFrame): Team performance data
-        team (str): Team name
-        num_weeks (int): Number of recent weeks to analyze
+        training_data (pd.DataFrame): Game data with spread results
 
     Returns:
-        pd.DataFrame: Recent performance trends
+        dict: Dictionary of situational ATS dataframes
     """
-    if team_averages is None or team_averages.empty:
-        return pd.DataFrame()
+    if training_data is None or training_data.empty:
+        return {}
 
-    team_col = 'team' if 'team' in team_averages.columns else 'team_name'
-    team_data = team_averages[team_averages[team_col] == team].copy()
+    df = training_data.copy()
+    results = {}
 
-    # Sort by season and week
-    team_data = team_data.sort_values(['season', 'week'], ascending=False)
+    results['overall'] = calculate_ats_record(df)
 
-    # Get last N weeks
-    recent = team_data.head(num_weeks)
+    if 'spread' in df.columns:
+        favorites = df[df['spread'] < 0]
+        underdogs = df[df['spread'] > 0]
 
-    return recent
+        results['as_favorite'] = calculate_ats_record(favorites)
+        results['as_underdog'] = calculate_ats_record(underdogs)
+
+    return results
 
 
-def identify_injury_impacts(play_by_play, depth_charts):
+# =============================================================================
+# V1 PLAYER GRADE FUNCTIONS
+# =============================================================================
+
+def aggregate_player_grades_by_category(weekly_starters_off, weekly_starters_def,
+                                         team, week, season):
     """
-    Identify games with significant injury impacts
+    Aggregate player grades into categories for a specific team/week
 
     Args:
-        play_by_play (pd.DataFrame): Play-by-play data with injury flags
-        depth_charts (pd.DataFrame): Depth chart data
+        weekly_starters_off: Weekly offense depth chart DataFrame
+        weekly_starters_def: Weekly defense depth chart DataFrame
+        team: Team name
+        week: Week number
+        season: Season year
 
     Returns:
-        pd.DataFrame: Games with injury flags
+        dict with grade categories (pass_blocking, run_blocking, etc.)
     """
-    if play_by_play is None or play_by_play.empty:
+    grades = {}
+
+    # Filter offense data
+    if weekly_starters_off is not None:
+        off_data = weekly_starters_off[
+            (weekly_starters_off['team'] == team) &
+            (weekly_starters_off['week'] == week) &
+            (weekly_starters_off['season'] == season)
+        ]
+
+        if not off_data.empty:
+            # Offensive line grades
+            ol_positions = ['T', 'G', 'C', 'OT', 'OG', 'LT', 'RT', 'LG', 'RG']
+            ol_data = off_data[off_data['position'].isin(ol_positions)]
+
+            if 'grades_pass_block' in off_data.columns:
+                grades['pass_blocking'] = ol_data['grades_pass_block'].mean() if not ol_data.empty else np.nan
+            if 'grades_run_block' in off_data.columns:
+                grades['run_blocking'] = ol_data['grades_run_block'].mean() if not ol_data.empty else np.nan
+
+            # QB grades
+            qb_data = off_data[off_data['position'] == 'QB']
+            if 'grades_pass' in off_data.columns:
+                grades['qb_passing'] = qb_data['grades_pass'].mean() if not qb_data.empty else np.nan
+            if 'grades_run' in off_data.columns:
+                grades['qb_running'] = qb_data['grades_run'].mean() if not qb_data.empty else np.nan
+
+            # Receiver grades
+            rec_positions = ['WR', 'TE']
+            rec_data = off_data[off_data['position'].isin(rec_positions)]
+            if 'grades_receiving' in off_data.columns:
+                grades['receiving'] = rec_data['grades_receiving'].mean() if not rec_data.empty else np.nan
+
+            # RB grades
+            rb_data = off_data[off_data['position'] == 'RB']
+            if 'grades_offense' in off_data.columns:
+                grades['rb_rushing'] = rb_data['grades_offense'].mean() if not rb_data.empty else np.nan
+
+    # Filter defense data
+    if weekly_starters_def is not None:
+        def_data = weekly_starters_def[
+            (weekly_starters_def['team'] == team) &
+            (weekly_starters_def['week'] == week) &
+            (weekly_starters_def['season'] == season)
+        ]
+
+        if not def_data.empty:
+            if 'run_defense_grade' in def_data.columns:
+                grades['run_defense'] = def_data['run_defense_grade'].mean()
+            if 'coverage_grade' in def_data.columns:
+                grades['pass_defense'] = def_data['coverage_grade'].mean()
+                grades['coverage'] = def_data['coverage_grade'].mean()
+            if 'defense_grade' in def_data.columns:
+                grades['overall_defense'] = def_data['defense_grade'].mean()
+            if 'pass_rush_grade' in def_data.columns:
+                grades['pass_rush'] = def_data['pass_rush_grade'].mean()
+
+    return grades
+
+
+def calculate_injury_impact_by_week(healthy_off, healthy_def, weekly_off, weekly_def,
+                                    team, season):
+    """
+    Calculate grade differences across all weeks for injury impact analysis
+
+    Args:
+        healthy_off: Healthy offense depth chart DataFrame
+        healthy_def: Healthy defense depth chart DataFrame
+        weekly_off: Weekly offense depth chart DataFrame
+        weekly_def: Weekly defense depth chart DataFrame
+        team: Team name
+        season: Season year
+
+    Returns:
+        DataFrame with columns: week, category, healthy_grade, weekly_grade, difference
+    """
+    if weekly_off is None:
         return pd.DataFrame()
 
-    # Look for injury-related columns
-    injury_cols = [col for col in play_by_play.columns if 'injury' in col.lower()]
+    # Get weeks for this team/season
+    team_weeks = weekly_off[
+        (weekly_off['team'] == team) &
+        (weekly_off['season'] == season)
+    ]['week'].unique()
 
-    if injury_cols:
-        # Filter to games with injuries
-        injured_games = play_by_play[
-            play_by_play[injury_cols].notna().any(axis=1)
-        ].copy()
+    impact_data = []
 
-        return injured_games
+    for week in sorted(team_weeks):
+        healthy_grades = aggregate_player_grades_by_category(
+            healthy_off, healthy_def, team, week, season
+        )
+        weekly_grades = aggregate_player_grades_by_category(
+            weekly_off, weekly_def, team, week, season
+        )
 
-    return pd.DataFrame()
+        for category in healthy_grades.keys():
+            healthy_val = healthy_grades.get(category, np.nan)
+            weekly_val = weekly_grades.get(category, np.nan)
+
+            if pd.notna(healthy_val) and pd.notna(weekly_val):
+                diff = weekly_val - healthy_val
+            else:
+                diff = np.nan
+
+            impact_data.append({
+                'week': int(week),
+                'category': category,
+                'healthy_grade': healthy_val,
+                'weekly_grade': weekly_val,
+                'difference': diff
+            })
+
+    return pd.DataFrame(impact_data)
 
 
-def calculate_epa_differential(team_averages, team1, team2, season, week):
+def get_team_weekly_data(df, team, season):
+    """
+    Get weekly performance data for a team
+
+    Args:
+        df: Team-week DataFrame
+        team: Team name
+        season: Season year
+
+    Returns:
+        DataFrame with weekly data sorted by week
+    """
+    if df is None:
+        return pd.DataFrame()
+
+    team_data = df[(df['team'] == team) & (df['season'] == season)]
+    return team_data.sort_values('week')
+
+
+# =============================================================================
+# EPA DIFFERENTIAL CALCULATIONS
+# =============================================================================
+
+def calculate_epa_differential(team_averages, team1, team2, season, week=None):
     """
     Calculate EPA differential between two teams
 
@@ -353,7 +587,7 @@ def calculate_epa_differential(team_averages, team1, team2, season, week):
         team1 (str): First team
         team2 (str): Second team
         season (int): Season
-        week (int): Week
+        week (int, optional): Up to this week
 
     Returns:
         dict: EPA differential metrics
@@ -366,36 +600,38 @@ def calculate_epa_differential(team_averages, team1, team2, season, week):
     # Get latest data for both teams
     team1_data = team_averages[
         (team_averages[team_col] == team1) &
-        (team_averages['season'] == season) &
-        (team_averages['week'] <= week)
-    ].sort_values('week', ascending=False).head(1)
-
+        (team_averages['season'] == season)
+    ]
     team2_data = team_averages[
         (team_averages[team_col] == team2) &
-        (team_averages['season'] == season) &
-        (team_averages['week'] <= week)
-    ].sort_values('week', ascending=False).head(1)
+        (team_averages['season'] == season)
+    ]
+
+    if week is not None:
+        team1_data = team1_data[team1_data['week'] <= week]
+        team2_data = team2_data[team2_data['week'] <= week]
 
     if team1_data.empty or team2_data.empty:
         return {}
 
     result = {}
 
-    # Offensive EPA differential
-    if 'epa_per_play_offense' in team_averages.columns:
+    # Calculate EPA differentials
+    epa_col = 'epa_mean' if 'epa_mean' in team_averages.columns else 'epa_per_play_offense'
+    def_epa_col = 'against_epa_mean' if 'against_epa_mean' in team_averages.columns else 'epa_per_play_defense'
+
+    if epa_col in team_averages.columns:
         result['off_epa_diff'] = (
-            team1_data['epa_per_play_offense'].values[0] -
-            team2_data['epa_per_play_offense'].values[0]
+            team1_data[epa_col].mean() -
+            team2_data[epa_col].mean()
         )
 
-    # Defensive EPA differential
-    if 'epa_per_play_defense' in team_averages.columns:
+    if def_epa_col in team_averages.columns:
         result['def_epa_diff'] = (
-            team2_data['epa_per_play_defense'].values[0] -
-            team1_data['epa_per_play_defense'].values[0]
+            team2_data[def_epa_col].mean() -
+            team1_data[def_epa_col].mean()
         )
 
-    # Overall EPA edge
     if 'off_epa_diff' in result and 'def_epa_diff' in result:
         result['total_epa_edge'] = result['off_epa_diff'] + result['def_epa_diff']
 

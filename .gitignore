@@ -1,6 +1,7 @@
 *.csv
 secrets_env.py
 secrets.py
+secrets_config.py
 
 # Python cache
 __pycache__/
